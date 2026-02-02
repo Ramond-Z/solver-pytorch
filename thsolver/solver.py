@@ -22,6 +22,7 @@ from .sampler import InfSampler, DistributedInfSampler
 from .tracker import AverageTracker
 from .config import parse_args
 from .lr_scheduler import get_lr_scheduler
+from .mix_precision import InflatAllOptimizerWrapper
 
 
 class Solver:
@@ -134,6 +135,14 @@ class Solver:
           parameters, lr=base_lr, weight_decay=flags.weight_decay)
     else:
       raise ValueError
+    if flags.use_inflat_all:
+      if flags.use_amp:
+        raise ValueError("use_inflat_all and use_amp cannot be used together")
+      self.optimizer = InflatAllOptimizerWrapper(
+          self.optimizer,
+          flags.inflat_all_dtype,
+          parameters,
+      )
 
   def config_lr_scheduler(self):
     # This function must be called after :func:`configure_optimizer`

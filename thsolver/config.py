@@ -54,6 +54,8 @@ _C.SOLVER.port              = 10001      # The port number for distributed train
 _C.SOLVER.progress_bar      = True       # Enable the progress_bar or not
 _C.SOLVER.rand_seed         = -1         # Fix the random seed if larger than 0
 _C.SOLVER.empty_cache       = 50       # Empty cuda cache periodically
+_C.SOLVER.cpu_threads       = 1          # CPU threads used by each training rank
+_C.SOLVER.profile_timing    = False      # Log current data-wait and step timings
 
 # DATA related parameters
 _C.DATA = CN(new_allowed=True)
@@ -86,6 +88,7 @@ _C.DATA.train.filelist      = ''          # The data filelist
 _C.DATA.train.batch_size    = 32          # Training data batch size
 _C.DATA.train.take          = -1          # Number of samples used for training
 _C.DATA.train.num_workers   = 4           # Number of workers to load the data
+_C.DATA.train.worker_threads = 1          # CPU threads used inside each worker
 _C.DATA.train.shuffle       = False       # Shuffle the input data
 # _C.DATA.train.in_memory     = False       # Load the training data into memory
 

@@ -24,6 +24,7 @@ class AverageTracker:
     self.num = dict()
     self.max_len = 76
     self.start_time = self.get_time()
+    self.last_time = self.start_time
 
   def get_time(self):
     r''' Returns the current synchronized wall-clock time. '''
@@ -47,8 +48,11 @@ class AverageTracker:
       num_iters (int): The number of iterations represented by the update.
     '''
 
-    self.value['time/iter'] = self.get_time() - self.start_time
+    curr_time = self.get_time()
+    elapsed = curr_time - self.last_time
+    self.value['time/iter'] = self.value.get('time/iter', 0) + elapsed
     self.num['time/iter'] = self.num.get('time/iter', 0) + num_iters
+    self.last_time = curr_time
 
   def average(self):
     r''' Returns the averaged values accumulated in the tracker. '''

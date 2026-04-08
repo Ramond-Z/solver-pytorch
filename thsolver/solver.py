@@ -5,7 +5,9 @@
 # Written by Peng-Shuai Wang
 # --------------------------------------------------------
 
+import functools
 import os
+import time
 import torch
 import torch.nn
 import torch.optim
@@ -22,6 +24,49 @@ from .sampler import InfSampler, DistributedInfSampler
 from .tracker import AverageTracker
 from .config import parse_args
 from .lr_scheduler import get_lr_scheduler
+
+
+_THREAD_ENV_VARS = (
+    'OMP_NUM_THREADS',
+    'MKL_NUM_THREADS',
+    'OPENBLAS_NUM_THREADS',
+    'NUMEXPR_NUM_THREADS',
+)
+
+
+def _cap_thread_env(num_threads: int):
+  r'''Caps common CPU thread-pool env vars in the current process.'''
+
+  num_threads = max(1, int(num_threads))
+  for key in _THREAD_ENV_VARS:
+    value = os.environ.get(key)
+    if value is None:
+      os.environ[key] = str(num_threads)
+      continue
+    try:
+      if int(value) > num_threads:
+        os.environ[key] = str(num_threads)
+    except ValueError:
+      pass
+
+
+def _set_torch_cpu_threads(num_threads: int):
+  r'''Limits PyTorch intra-op and inter-op CPU thread pools.'''
+
+  num_threads = max(1, int(num_threads))
+  torch.set_num_threads(num_threads)
+  try:
+    torch.set_num_interop_threads(num_threads)
+  except RuntimeError:
+    pass
+
+
+def _init_dataloader_worker(worker_id: int, num_threads: int):
+  r'''Applies conservative CPU-thread limits inside each DataLoader worker.'''
+
+  del worker_id
+  _cap_thread_env(num_threads)
+  _set_torch_cpu_threads(num_threads)
 
 
 class Solver:
@@ -144,10 +189,48 @@ class Solver:
     else:
       sampler = InfSampler(dataset, shuffle=flags.shuffle)
 
+    num_workers = int(flags.num_workers)
+    worker_threads = int(flags.get('worker_threads', 1))
+    worker_init_fn = None
+    if num_workers > 0:
+      worker_init_fn = functools.partial(
+          _init_dataloader_worker, num_threads=worker_threads)
+
     data_loader = torch.utils.data.DataLoader(
-        dataset, batch_size=flags.batch_size, num_workers=flags.num_workers,
-        sampler=sampler, collate_fn=collate_fn, pin_memory=flags.pin_memory)
+        dataset, batch_size=flags.batch_size, num_workers=num_workers,
+        sampler=sampler, collate_fn=collate_fn, pin_memory=flags.pin_memory,
+        persistent_workers=(num_workers > 0 and flags.get('persistent_workers', True)),
+        prefetch_factor=(flags.get('prefetch_factor', 2) if num_workers > 0 else None),
+        worker_init_fn=worker_init_fn)
     return data_loader
+
+  def shutdown_dataloaders(self):
+    r'''Best-effort shutdown for multiprocessing dataloaders before exit.'''
+
+    for attr in ('train_iter', 'test_iter'):
+      data_iter = getattr(self, attr, None)
+      if data_iter is not None and hasattr(data_iter, '_shutdown_workers'):
+        try:
+          data_iter._shutdown_workers()
+        except RuntimeError:
+          pass
+      setattr(self, attr, None)
+    self.train_loader = None
+    self.test_loader = None
+
+  @staticmethod
+  def distributed_barrier(device: int | None = None):
+    r'''Synchronizes distributed ranks on the given CUDA device when possible.'''
+
+    if not torch.distributed.is_initialized():
+      return
+    if device is None:
+      torch.distributed.barrier()
+      return
+    try:
+      torch.distributed.barrier(device_ids=[device])
+    except TypeError:
+      torch.distributed.barrier()
 
   def config_model(self):
     r''' Builds the model, moves it to CUDA, and wraps DDP if needed. '''
@@ -239,13 +322,16 @@ class Solver:
         torch.cuda.empty_cache()
 
       # load data
+      data_start = time.perf_counter()
       batch = next(self.train_iter)
+      data_time = time.perf_counter() - data_start
       batch['iter_num'] = it
       batch['epoch'] = epoch
 
       # forward and backward
       self.optimizer.zero_grad(flags.zero_grad_to_none)
       clip_grad = self.FLAGS.SOLVER.clip_grad
+      step_start = time.perf_counter()
 
       if self.amp_mode == 'none':
         output = self.train_step(batch)
@@ -274,6 +360,9 @@ class Solver:
           self.optimizer.step()
       else:
         raise ValueError(f'Invalid amp mode: {self.amp_mode}')
+      if torch.cuda.is_available():
+        torch.cuda.synchronize()
+      step_time = time.perf_counter() - step_start
 
       # track the averaged tensors
       avg_tracker.update(output)
@@ -283,6 +372,8 @@ class Solver:
       log_per_iter = flags.log_per_iter
       if self.is_master and log_per_iter > 0 and it % log_per_iter == 0:
         notes = 'iter: %d' % it
+        if flags.get('profile_timing', False):
+          notes += ', data_wait: %.3fs, step: %.3fs' % (data_time, step_time)
         avg_tracker.log(epoch, msg_tag='- ', notes=notes, print_time=False)
 
     # save logs
@@ -454,8 +545,8 @@ class Solver:
     r''' Runs the end-to-end training workflow. '''
 
     self.manual_seed()
-    self.config_model()
     self.config_dataloader()
+    self.config_model()
     self.config_optimizer()
     self.config_lr_scheduler()
     self.configure_log()
@@ -479,29 +570,32 @@ class Solver:
         self.test_epoch(epoch)
 
     # sync and exit
+    self.shutdown_dataloaders()
     if self.world_size > 1:
-      torch.distributed.barrier()
+      self.distributed_barrier(self.device)
 
   def test(self):
     r''' Loads a checkpoint and runs the test loop once. '''
 
     self.manual_seed()
+    self.config_dataloader(disable_train_data=True)
     self.config_model()
     self.configure_log(set_writer=False)
-    self.config_dataloader(disable_train_data=True)
     self.load_checkpoint()
     self.test_epoch(epoch=0)
+    self.shutdown_dataloaders()
 
   def evaluate(self):
     r''' Loads a checkpoint and runs the evaluation loop. '''
 
     self.manual_seed()
+    self.config_dataloader(disable_train_data=True)
     self.config_model()
     self.configure_log(set_writer=False)
-    self.config_dataloader(disable_train_data=True)
     self.load_checkpoint()
     for epoch in tqdm(range(self.FLAGS.SOLVER.eval_epoch), ncols=80):
       self.eval_epoch(epoch)
+    self.shutdown_dataloaders()
 
   def profile(self):
     r''' Profiles a few training iterations with the PyTorch profiler.
@@ -509,8 +603,8 @@ class Solver:
     Set ``DATA.train.num_workers 0`` when using this function.
     '''
 
-    self.config_model()
     self.config_dataloader()
+    self.config_model()
     logdir = self.FLAGS.SOLVER.logdir
 
     # check
@@ -590,6 +684,9 @@ class Solver:
 
     world_size = cls.get_world_size(FLAGS)
     newer_than_280 = version.parse(torch.__version__) >= version.parse('2.8.0')
+    cpu_threads = int(FLAGS.SOLVER.get('cpu_threads', 1))
+    _cap_thread_env(cpu_threads)
+    _set_torch_cpu_threads(cpu_threads)
 
     if FLAGS.SOLVER.ddp_mode == "spawn":
       # Set the GPU to use.
@@ -603,7 +700,7 @@ class Solver:
                  'world_size': world_size, 'rank': rank}
         if newer_than_280: param['device_id'] = gpu_rank
         torch.distributed.init_process_group(**param)
-        torch.distributed.barrier()
+        cls.distributed_barrier(gpu_rank)
 
     elif FLAGS.SOLVER.ddp_mode == "torchrun":
       local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -615,7 +712,7 @@ class Solver:
         param = {'backend': 'nccl', 'init_method': 'env://'}
         if newer_than_280: param['device_id'] = local_rank
         torch.distributed.init_process_group(**param)
-        torch.distributed.barrier()
+        cls.distributed_barrier(local_rank)
 
     else:
       raise NotImplementedError

@@ -212,6 +212,7 @@ class Solver:
                 flags.get("prefetch_factor", 2) if num_workers > 0 else None
             ),
             worker_init_fn=worker_init_fn,
+            in_order=flags.get("in_order", False)
         )
         return data_loader
 

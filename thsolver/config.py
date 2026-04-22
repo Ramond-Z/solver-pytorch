@@ -170,6 +170,8 @@ def _update_config(FLAGS, args):
             FLAGS.merge_from_other_cfg(cfg)
     if args.opts:
         FLAGS.merge_from_list(args.opts)
+    if getattr(args, "hide_progress_bar", False):
+        FLAGS.SOLVER.progress_bar = False
     FLAGS.SYS.cmds = "python " + " ".join(sys.argv)
 
     # update logdir
@@ -237,6 +239,11 @@ def parse_args(backup=True):
         type=int,
         default=0,
         help="local rank for distributed training",
+    )
+    parser.add_argument(
+        "--hide-progress-bar",
+        action="store_true",
+        help="Disable tqdm progress bars for solver loops.",
     )
     parser.add_argument(
         "opts",

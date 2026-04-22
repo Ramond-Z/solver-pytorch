@@ -448,7 +448,9 @@ class Solver:
         eval_step = min(self.FLAGS.SOLVER.eval_step, len(self.test_loader))
         if eval_step < 1:
             eval_step = len(self.test_loader)
-        for it in tqdm(range(eval_step), ncols=80, leave=False):
+        for it in tqdm(
+            range(eval_step), ncols=80, leave=False, disable=self.disable_tqdm
+        ):
             batch = next(self.test_iter)
             batch["iter_num"] = it
             batch["epoch"] = epoch
@@ -627,7 +629,9 @@ class Solver:
         self.config_model()
         self.configure_log(set_writer=False)
         self.load_checkpoint()
-        for epoch in tqdm(range(self.FLAGS.SOLVER.eval_epoch), ncols=80):
+        for epoch in tqdm(
+            range(self.FLAGS.SOLVER.eval_epoch), ncols=80, disable=self.disable_tqdm
+        ):
             self.eval_epoch(epoch)
         self.shutdown_dataloaders()
 

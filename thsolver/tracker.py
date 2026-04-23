@@ -85,6 +85,7 @@ class AverageTracker:
         notes: str = "",
         print_time: bool = True,
         print_memory: bool = False,
+        print_console: bool = True,
     ):
         r"""Logs the average value to the console, TensorBoard, and a log file.
 
@@ -134,4 +135,5 @@ class AverageTracker:
         # split the msg for better display
         chunks = [msg[i : i + self.max_len] for i in range(0, len(msg), self.max_len)]
         msg = (msg_tag + " ") + ("\n" + len(msg_tag) * " " + " ").join(chunks)
-        tqdm.write(msg)
+        if print_console:
+            tqdm.write(msg)

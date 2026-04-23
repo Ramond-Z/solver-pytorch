@@ -56,6 +56,7 @@ _C.SOLVER.scale_lr = True  # Scale the learning rate with the world size
 # _C.SOLVER.dist_url          = 'tcp://localhost:10001'
 _C.SOLVER.port = 10001  # The port number for distributed training
 _C.SOLVER.progress_bar = True  # Enable the progress_bar or not
+_C.SOLVER.console_log = True  # Print epoch/test/best-model logs to the console
 _C.SOLVER.rand_seed = -1  # Fix the random seed if larger than 0
 _C.SOLVER.empty_cache = 50  # Empty cuda cache periodically
 _C.SOLVER.cpu_threads = 1  # CPU threads used by each training rank
@@ -172,6 +173,8 @@ def _update_config(FLAGS, args):
         FLAGS.merge_from_list(args.opts)
     if getattr(args, "hide_progress_bar", False):
         FLAGS.SOLVER.progress_bar = False
+    if getattr(args, "hide_solver_logs", False):
+        FLAGS.SOLVER.console_log = False
     FLAGS.SYS.cmds = "python " + " ".join(sys.argv)
 
     # update logdir
@@ -244,6 +247,11 @@ def parse_args(backup=True):
         "--hide-progress-bar",
         action="store_true",
         help="Disable tqdm progress bars for solver loops.",
+    )
+    parser.add_argument(
+        "--hide-solver-logs",
+        action="store_true",
+        help="Disable epoch/test/best-model console logs from the solver.",
     )
     parser.add_argument(
         "opts",

@@ -88,6 +88,7 @@ class Solver:
         self.world_size = self.get_world_size(FLAGS)
         self.device = torch.cuda.current_device()
         self.disable_tqdm = not (is_master and FLAGS.SOLVER.progress_bar)
+        self.console_log = bool(FLAGS.SOLVER.get("console_log", True))
         self.start_epoch = 1
         self.amp_mode = FLAGS.SOLVER.amp_mode
 
@@ -397,13 +398,24 @@ class Solver:
                 notes = "iter: %d" % it
                 if flags.get("profile_timing", False):
                     notes += ", data_wait: %.3fs, step: %.3fs" % (data_time, step_time)
-                avg_tracker.log(epoch, msg_tag="- ", notes=notes, print_time=False)
+                avg_tracker.log(
+                    epoch,
+                    msg_tag="- ",
+                    notes=notes,
+                    print_time=False,
+                    print_console=self.console_log,
+                )
 
         # save logs
         if self.world_size > 1:
             avg_tracker.average_all_gather()
         if self.is_master:
-            avg_tracker.log(epoch, self.summary_writer, print_time=True)
+            avg_tracker.log(
+                epoch,
+                self.summary_writer,
+                print_time=True,
+                print_console=self.console_log,
+            )
 
     def test_epoch(self, epoch):
         r"""Runs one full test epoch.
@@ -435,7 +447,13 @@ class Solver:
         if self.is_master:
             self.result_callback(avg_tracker, epoch)
             self.save_best_checkpoint(avg_tracker, epoch)
-            avg_tracker.log(epoch, self.summary_writer, self.log_file, msg_tag="=>")
+            avg_tracker.log(
+                epoch,
+                self.summary_writer,
+                self.log_file,
+                msg_tag="=>",
+                print_console=self.console_log,
+            )
 
     def eval_epoch(self, epoch):
         r"""Runs one evaluation epoch in ``evaluate`` mode.
@@ -487,7 +505,8 @@ class Solver:
                 msg = "epoch: %d, %s: %f" % (epoch, key, curr_val)
                 with open(os.path.join(self.logdir, "best_model.txt"), "a") as fid:
                     fid.write(msg + "\n")
-                tqdm.write("=> Best model at " + msg)
+                if self.console_log:
+                    tqdm.write("=> Best model at " + msg)
 
     def save_checkpoint(self, epoch):
         r"""Saves a training checkpoint for the given epoch.

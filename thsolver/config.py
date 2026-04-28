@@ -61,6 +61,7 @@ _C.SOLVER.rand_seed = -1  # Fix the random seed if larger than 0
 _C.SOLVER.empty_cache = 50  # Empty cuda cache periodically
 _C.SOLVER.cpu_threads = 1  # CPU threads used by each training rank
 _C.SOLVER.profile_timing = False  # Log current data-wait and step timings
+_C.SOLVER.profile_timing_detail = False  # Log detailed timing breakdowns
 
 # DATA related parameters
 _C.DATA = CN(new_allowed=True)

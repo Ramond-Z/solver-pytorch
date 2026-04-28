@@ -8,6 +8,7 @@
 import functools
 import os
 import time
+from contextlib import contextmanager
 import torch
 import torch.nn
 import torch.optim
@@ -31,6 +32,22 @@ _THREAD_ENV_VARS = (
     "OPENBLAS_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
 )
+
+
+@contextmanager
+def _profile_section(enabled: bool, output: dict, name: str):
+    if not enabled:
+        yield
+        return
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        output[name] = time.perf_counter() - start
 
 
 def _cap_thread_env(num_threads: int):
@@ -213,7 +230,7 @@ class Solver:
                 flags.get("prefetch_factor", 2) if num_workers > 0 else None
             ),
             worker_init_fn=worker_init_fn,
-            in_order=flags.get("in_order", False)
+            in_order=flags.get("in_order", False),
         )
         return data_loader
 
@@ -268,6 +285,8 @@ class Solver:
                 total_params += p.numel()
             print("Total number of parameters: %.3fM" % (total_params / 1e6))
         self.model = model
+        if hasattr(self, "_configure_profile_timing_detail"):
+            self._configure_profile_timing_detail()
 
     def config_optimizer(self):
         r"""Builds the optimizer for the current model.
@@ -354,33 +373,63 @@ class Solver:
             self.optimizer.zero_grad(flags.zero_grad_to_none)
             clip_grad = self.FLAGS.SOLVER.clip_grad
             step_start = time.perf_counter()
+            detailed_timing = {}
+            profile_detail = bool(flags.get("profile_timing_detail", False))
 
             if self.amp_mode == "none":
-                output = self.train_step(batch)
-                loss = output["train/loss"]
-                loss.backward()
-                if clip_grad > 0:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), clip_grad)
-                self.optimizer.step()
-            elif self.amp_mode == "fp16":
-                with torch.autocast("cuda", dtype=torch.float16):
+                with _profile_section(profile_detail, detailed_timing, "step/forward"):
                     output = self.train_step(batch)
                     loss = output["train/loss"]
-                self.scaler.scale(loss).backward()
-                if clip_grad > 0:
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), clip_grad)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            elif self.amp_mode == "bf16":
-                with torch.autocast("cuda", dtype=torch.bfloat16):
-                    output = self.train_step(batch)
-                    loss = output["train/loss"]
+                with _profile_section(profile_detail, detailed_timing, "step/backward"):
                     loss.backward()
-                    if clip_grad > 0:
+                if clip_grad > 0:
+                    with _profile_section(
+                        profile_detail, detailed_timing, "step/clip_grad"
+                    ):
                         torch.nn.utils.clip_grad_norm_(
                             self.model.parameters(), clip_grad
                         )
+                with _profile_section(
+                    profile_detail, detailed_timing, "step/optimizer"
+                ):
+                    self.optimizer.step()
+            elif self.amp_mode == "fp16":
+                with _profile_section(profile_detail, detailed_timing, "step/forward"):
+                    with torch.autocast("cuda", dtype=torch.float16):
+                        output = self.train_step(batch)
+                        loss = output["train/loss"]
+                with _profile_section(profile_detail, detailed_timing, "step/backward"):
+                    self.scaler.scale(loss).backward()
+                if clip_grad > 0:
+                    with _profile_section(
+                        profile_detail, detailed_timing, "step/clip_grad"
+                    ):
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(), clip_grad
+                        )
+                with _profile_section(
+                    profile_detail, detailed_timing, "step/optimizer"
+                ):
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+            elif self.amp_mode == "bf16":
+                with _profile_section(profile_detail, detailed_timing, "step/forward"):
+                    with torch.autocast("cuda", dtype=torch.bfloat16):
+                        output = self.train_step(batch)
+                        loss = output["train/loss"]
+                with _profile_section(profile_detail, detailed_timing, "step/backward"):
+                    loss.backward()
+                if clip_grad > 0:
+                    with _profile_section(
+                        profile_detail, detailed_timing, "step/clip_grad"
+                    ):
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(), clip_grad
+                        )
+                with _profile_section(
+                    profile_detail, detailed_timing, "step/optimizer"
+                ):
                     self.optimizer.step()
             else:
                 raise ValueError(f"Invalid amp mode: {self.amp_mode}")
@@ -389,6 +438,31 @@ class Solver:
             step_time = time.perf_counter() - step_start
 
             # track the averaged tensors
+            raw_model_timing = None
+            if profile_detail:
+                raw_model_timing = output.pop("_profile/model_timing", None)
+                if isinstance(raw_model_timing, dict):
+                    output.update(
+                        {
+                            key: torch.tensor(
+                                value,
+                                device=loss.device,
+                                dtype=torch.float32,
+                            )
+                            for key, value in raw_model_timing.items()
+                        }
+                    )
+            if profile_detail:
+                output.update(
+                    {
+                        key: torch.tensor(
+                            value,
+                            device=loss.device,
+                            dtype=torch.float32,
+                        )
+                        for key, value in detailed_timing.items()
+                    }
+                )
             avg_tracker.update(output)
             avg_tracker.record_time()
 
@@ -398,6 +472,28 @@ class Solver:
                 notes = "iter: %d" % it
                 if flags.get("profile_timing", False):
                     notes += ", data_wait: %.3fs, step: %.3fs" % (data_time, step_time)
+                    if profile_detail:
+                        detail_notes = []
+                        for key in sorted(detailed_timing):
+                            detail_notes.append(
+                                "%s: %.3fs" % (key, detailed_timing[key])
+                            )
+                        for key in sorted(output):
+                            if not isinstance(key, str) or not key.startswith(
+                                "profile/"
+                            ):
+                                continue
+                            value = output[key]
+                            if torch.is_tensor(value):
+                                value = float(value.detach().item())
+                            detail_notes.append("%s: %.3fs" % (key, float(value)))
+                        if isinstance(raw_model_timing, dict):
+                            for key in sorted(raw_model_timing):
+                                detail_notes.append(
+                                    "%s: %.3fs" % (key, float(raw_model_timing[key]))
+                                )
+                        if detail_notes:
+                            notes += ", " + ", ".join(detail_notes)
                 avg_tracker.log(
                     epoch,
                     msg_tag="- ",

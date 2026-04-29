@@ -38,7 +38,13 @@ class AverageTracker:
         """
 
         for key, val in value.items():
-            self.value[key] = self.value.get(key, 0) + val.detach()
+            val = val.detach() if torch.is_tensor(val) else torch.as_tensor(val)
+            if torch.is_tensor(val) and not torch.isfinite(val).all():
+                if key not in self.value:
+                    self.value[key] = torch.zeros_like(val)
+                    self.num[key] = 0
+                continue
+            self.value[key] = self.value.get(key, 0) + val
             self.num[key] = self.num.get(key, 0) + 1
 
     def record_time(self, num_iters: int = 1):
@@ -57,7 +63,11 @@ class AverageTracker:
     def average(self):
         r"""Returns the averaged values accumulated in the tracker."""
 
-        return {key: float(val) / self.num[key] for key, val in self.value.items()}
+        return {
+            key: float(val) / self.num[key]
+            for key, val in self.value.items()
+            if self.num[key] > 0
+        }
 
     @torch.no_grad()
     def average_all_gather(self):
@@ -68,13 +78,27 @@ class AverageTracker:
         for key, tensor in self.value.items():
             if isinstance(tensor, torch.Tensor) and tensor.is_cuda:
                 # only gather tensors on GPU
-                tensors_gather = [
+                values_gather = [
                     torch.ones_like(tensor)
                     for _ in range(torch.distributed.get_world_size())
                 ]
-                torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
-                tensors = torch.stack(tensors_gather, dim=0)
-                self.value[key] = torch.mean(tensors)
+                torch.distributed.all_gather(values_gather, tensor, async_op=False)
+                values = torch.stack(values_gather, dim=0)
+
+                count = torch.tensor(
+                    float(self.num[key]),
+                    device=tensor.device,
+                    dtype=tensor.dtype,
+                )
+                counts_gather = [
+                    torch.ones_like(count)
+                    for _ in range(torch.distributed.get_world_size())
+                ]
+                torch.distributed.all_gather(counts_gather, count, async_op=False)
+                counts = torch.stack(counts_gather, dim=0)
+
+                self.value[key] = values.sum(dim=0)
+                self.num[key] = int(counts.sum().item())
 
     def log(
         self,

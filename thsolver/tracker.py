@@ -17,19 +17,21 @@ from typing import Dict, Optional
 class AverageTracker:
     r"""Tracks and logs averaged scalar tensors across iterations and epochs."""
 
-    def __init__(self):
+    def __init__(self, synchronize_cuda: bool = True):
         r"""Initializes the tracker state."""
 
         self.value = dict()
         self.num = dict()
         self.max_len = 76
+        self.synchronize_cuda = bool(synchronize_cuda)
         self.start_time = self.get_time()
         self.last_time = self.start_time
 
     def get_time(self):
         r"""Returns the current synchronized wall-clock time."""
 
-        torch.cuda.synchronize()
+        if self.synchronize_cuda and torch.cuda.is_available():
+            torch.cuda.synchronize()
         return time.time()
 
     def update(self, value: Dict[str, torch.Tensor]):

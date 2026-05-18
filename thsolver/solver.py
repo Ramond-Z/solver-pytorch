@@ -355,7 +355,12 @@ class Solver:
             self.train_loader.sampler.set_epoch(epoch)
 
         flags = self.FLAGS.SOLVER
-        avg_tracker = AverageTracker()
+        profile_timing = bool(flags.get("profile_timing", False))
+        profile_detail = bool(flags.get("profile_timing_detail", False))
+        sync_cuda_timing = bool(
+            flags.get("sync_cuda_timing", True) or profile_timing or profile_detail
+        )
+        avg_tracker = AverageTracker(synchronize_cuda=sync_cuda_timing)
         rng = range(len(self.train_loader))
         for it in tqdm(rng, ncols=80, leave=False, disable=self.disable_tqdm):
             # clear cache every 50 iterations
@@ -374,7 +379,6 @@ class Solver:
             clip_grad = self.FLAGS.SOLVER.clip_grad
             step_start = time.perf_counter()
             detailed_timing = {}
-            profile_detail = bool(flags.get("profile_timing_detail", False))
 
             if self.amp_mode == "none":
                 with _profile_section(profile_detail, detailed_timing, "step/forward"):
@@ -433,7 +437,7 @@ class Solver:
                     self.optimizer.step()
             else:
                 raise ValueError(f"Invalid amp mode: {self.amp_mode}")
-            if torch.cuda.is_available():
+            if sync_cuda_timing and torch.cuda.is_available():
                 torch.cuda.synchronize()
             step_time = time.perf_counter() - step_start
 
@@ -470,7 +474,7 @@ class Solver:
             log_per_iter = flags.log_per_iter
             if self.is_master and log_per_iter > 0 and it % log_per_iter == 0:
                 notes = "iter: %d" % it
-                if flags.get("profile_timing", False):
+                if profile_timing:
                     notes += ", data_wait: %.3fs, step: %.3fs" % (data_time, step_time)
                     if profile_detail:
                         detail_notes = []
@@ -503,7 +507,7 @@ class Solver:
                 )
 
         # save logs
-        if self.world_size > 1:
+        if self.world_size > 1 and flags.get("sync_epoch_metrics", True):
             avg_tracker.average_all_gather()
         if self.is_master:
             avg_tracker.log(

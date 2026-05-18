@@ -62,6 +62,8 @@ _C.SOLVER.empty_cache = 50  # Empty cuda cache periodically
 _C.SOLVER.cpu_threads = 1  # CPU threads used by each training rank
 _C.SOLVER.profile_timing = False  # Log current data-wait and step timings
 _C.SOLVER.profile_timing_detail = False  # Log detailed timing breakdowns
+_C.SOLVER.sync_cuda_timing = True  # Synchronize CUDA for accurate timing metrics
+_C.SOLVER.sync_epoch_metrics = True  # All-gather train metrics across ranks
 
 # DATA related parameters
 _C.DATA = CN(new_allowed=True)

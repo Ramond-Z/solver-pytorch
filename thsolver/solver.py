@@ -268,6 +268,18 @@ class Solver:
         flags = self.FLAGS.MODEL
         model = self.get_model(flags)
         model.cuda(device=self.device)
+        if flags.get("compile", False):
+            if not hasattr(torch, "compile"):
+                raise RuntimeError("MODEL.compile=True requires torch.compile support")
+            compile_kwargs = {
+                "backend": flags.get("compile_backend", "inductor"),
+                "fullgraph": bool(flags.get("compile_fullgraph", False)),
+                "dynamic": bool(flags.get("compile_dynamic", False)),
+            }
+            compile_mode = flags.get("compile_mode", None)
+            if compile_mode:
+                compile_kwargs["mode"] = compile_mode
+            model.forward = torch.compile(model.forward, **compile_kwargs)
         if self.world_size > 1:
             if flags.sync_bn:
                 model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)

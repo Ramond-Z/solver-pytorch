@@ -56,6 +56,7 @@ _C.SOLVER.scale_lr = True  # Scale the learning rate with the world size
 # _C.SOLVER.dist_url          = 'tcp://localhost:10001'
 _C.SOLVER.port = 10001  # The port number for distributed training
 _C.SOLVER.progress_bar = True  # Enable the progress_bar or not
+_C.SOLVER.snapshot_without_test = False
 _C.SOLVER.console_log = True  # Print epoch/test/best-model logs to the console
 _C.SOLVER.rand_seed = -1  # Fix the random seed if larger than 0
 _C.SOLVER.empty_cache = 50  # Empty cuda cache periodically
@@ -64,6 +65,10 @@ _C.SOLVER.profile_timing = False  # Log current data-wait and step timings
 _C.SOLVER.profile_timing_detail = False  # Log detailed timing breakdowns
 _C.SOLVER.sync_cuda_timing = True  # Synchronize CUDA for accurate timing metrics
 _C.SOLVER.sync_epoch_metrics = True  # All-gather train metrics across ranks
+
+# Sampling related parameters
+_C.SAMPLER = CN(new_allowed=True)
+_C.SAMPLER.snapshot_batch_size = 4  # Number of latent samples decoded in snapshots
 
 # DATA related parameters
 _C.DATA = CN(new_allowed=True)
